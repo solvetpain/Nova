@@ -44,6 +44,7 @@ local allGuis = {}
 local CONFIG_FILE = "nova_trigger_esp_config.json"
 local TOGGLE_KEY = "Delete"
 local menuOpen = true
+local savedBinds = {}
 
 -- ══════════════════════════════════════════════
 --  THEME ENGINE
@@ -327,6 +328,20 @@ local function FormatKey(k)
     return tostring(k):gsub("Enum%.KeyCode%.", "")
 end
 FormatKeyName = FormatKey
+
+local function MatchBindKey(bKey, inKey)
+    if not bKey or not inKey then return false end
+    if bKey == inKey then return true end
+    if (bKey == "MouseBackButton" or bKey == "MouseButton4" or bKey == "MB4") and
+       (inKey == "MouseBackButton" or inKey == "MouseButton4" or inKey == "MB4") then
+        return true
+    end
+    if (bKey == "MouseButton5" or bKey == "MouseForwardButton" or bKey == "MB5") and
+       (inKey == "MouseButton5" or inKey == "MouseForwardButton" or inKey == "MB5") then
+        return true
+    end
+    return false
+end
 
 -- ══════════════════════════════════════════════
 --  TRIGGERBOT IMPLEMENTATION
@@ -941,7 +956,7 @@ local function SaveConfig()
         if not writefile then return end
         local bindsData = {}
         for k, v in pairs(featureBinds) do
-            if v and v.key then
+            if v and (v.key or v.mode == "Always") then
                 bindsData[k] = { key = v.key, mode = v.mode or "Toggle" }
             end
         end
@@ -997,6 +1012,9 @@ local function LoadConfig()
             for k, v in pairs(data.esp) do
                 if ESP[k] ~= nil then ESP[k] = v end
             end
+        end
+        if type(data.binds) == "table" then
+            savedBinds = data.binds
         end
     end)
 end
@@ -1382,6 +1400,341 @@ local function AddSection(tabName, title)
     ConfigSystem.RegisterLabel(tL, title, true)
 end
 
+-- ── BIND MODE CONTEXT MENU (Toggle / Hold / Always / Clear) ──
+local bindContextMenu = Instance.new("Frame")
+bindContextMenu.Name = "NOVA_BindContextMenu"
+bindContextMenu.Size = UDim2.new(0, 86, 0, 96)
+bindContextMenu.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+bindContextMenu.BorderSizePixel = 0
+bindContextMenu.Visible = false
+bindContextMenu.ZIndex = 85
+bindContextMenu.ClipsDescendants = true
+bindContextMenu.Parent = mainSG
+Crn(bindContextMenu, 5)
+local bcmStroke = Strk(bindContextMenu, T.border, 1, 0)
+table.insert(allGuis, bindContextMenu)
+
+local bcmList = Instance.new("Frame")
+bcmList.Size = UDim2.new(1, 0, 1, 0)
+bcmList.Position = UDim2.new(0, 0, 0, 0)
+bcmList.BackgroundTransparency = 1
+bcmList.ZIndex = 86
+bcmList.Parent = bindContextMenu
+
+local bcmPad = Instance.new("UIPadding")
+bcmPad.PaddingTop = UDim.new(0, 3)
+bcmPad.PaddingBottom = UDim.new(0, 3)
+bcmPad.PaddingLeft = UDim.new(0, 4)
+bcmPad.PaddingRight = UDim.new(0, 4)
+bcmPad.Parent = bcmList
+
+local bcmLL = Instance.new("UIListLayout")
+bcmLL.SortOrder = Enum.SortOrder.LayoutOrder
+bcmLL.Padding = UDim.new(0, 0)
+bcmLL.Parent = bcmList
+
+local bcmTarget = nil
+local bcmButtons = {}
+local bcmIsOpen = false
+
+local CloseKeybindContextMenu
+CloseKeybindContextMenu = function(immediate)
+    if not bindContextMenu.Visible then return end
+    bcmIsOpen = false
+    bcmTarget = nil
+
+    if immediate then
+        bindContextMenu.Visible = false
+        return
+    end
+
+    local curPos = bindContextMenu.Position
+    local hidePos = UDim2.new(curPos.X.Scale, curPos.X.Offset, curPos.Y.Scale, curPos.Y.Offset - 5)
+    Tw(bindContextMenu, {Size = UDim2.new(0, 86, 0, 0), Position = hidePos}, 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    task.delay(0.15, function()
+        if not bcmIsOpen then
+            bindContextMenu.Visible = false
+        end
+    end)
+end
+
+local function UpdateBcmVisuals()
+    local curMode = (bcmTarget and featureBinds[bcmTarget.name] and featureBinds[bcmTarget.name].mode) or "Toggle"
+    for mName, btn in pairs(bcmButtons) do
+        local isCur = (mName == curMode)
+        if mName == "Clear" then
+            btn.TextColor3 = Color3.fromRGB(230, 85, 95)
+            btn.BackgroundTransparency = 1
+        elseif isCur then
+            Tw(btn, {TextColor3 = T.accent, BackgroundColor3 = T.accent, BackgroundTransparency = 0.84}, 0.15)
+        else
+            Tw(btn, {TextColor3 = T.textDim, BackgroundTransparency = 1}, 0.15)
+        end
+    end
+end
+
+local function SelectBindMode(mName)
+    if not bcmTarget then return end
+    local tName = bcmTarget.name
+    local targetCopy = bcmTarget
+
+    if mName == "Clear" then
+        featureBinds[tName] = nil
+        if targetCopy.dotsBtn then
+            targetCopy.dotsBtn.Text = "..."
+            targetCopy.dotsBtn.TextColor3 = T.textMuted
+            local s = targetCopy.dotsF and targetCopy.dotsF:FindFirstChildOfClass("UIStroke")
+            if s then s.Color = T.border end
+        end
+    else
+        if not featureBinds[tName] then
+            featureBinds[tName] = {
+                key = nil,
+                shortKey = "...",
+                mode = mName,
+                toggleObj = targetCopy.toggle,
+                name = tName,
+            }
+        else
+            featureBinds[tName].mode = mName
+            featureBinds[tName].toggleObj = targetCopy.toggle
+        end
+
+        if targetCopy.dotsBtn then
+            if featureBinds[tName].key then
+                targetCopy.dotsBtn.Text = featureBinds[tName].shortKey
+                targetCopy.dotsBtn.TextColor3 = T.accent
+            elseif mName == "Always" then
+                targetCopy.dotsBtn.Text = "ALW"
+                targetCopy.dotsBtn.TextColor3 = T.accent
+            else
+                targetCopy.dotsBtn.Text = "..."
+                targetCopy.dotsBtn.TextColor3 = T.textMuted
+            end
+            Tw(targetCopy.dotsBtn, {TextColor3 = Color3.fromRGB(255, 255, 255)}, 0.08)
+            task.delay(0.1, function()
+                if targetCopy.dotsBtn and targetCopy.dotsBtn.Parent then
+                    Tw(targetCopy.dotsBtn, {TextColor3 = T.accent}, 0.22)
+                end
+            end)
+        end
+
+        if mName == "Always" and targetCopy.toggle then
+            targetCopy.toggle.setToggle(true, true)
+        end
+    end
+
+    local clickedBtn = bcmButtons[mName]
+    if clickedBtn then
+        Tw(clickedBtn, {BackgroundTransparency = 0.55, TextColor3 = Color3.fromRGB(255, 255, 255)}, 0.08)
+    end
+
+    UpdateBcmVisuals()
+    task.delay(0.08, function()
+        CloseKeybindContextMenu(false)
+        if ConfigSystem.UpdateKeybindsHud then ConfigSystem.UpdateKeybindsHud() end
+        SaveConfig()
+    end)
+end
+
+for i, mName in ipairs({"Toggle", "Hold", "Always", "Clear"}) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 20)
+    btn.BackgroundTransparency = 1
+    btn.BackgroundColor3 = T.accent
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.Arcade
+    btn.Text = mName
+    btn.TextColor3 = (mName == "Clear") and Color3.fromRGB(230, 85, 95) or T.textDim
+    btn.TextSize = 10
+    btn.TextXAlignment = Enum.TextXAlignment.Center
+    btn.AutoButtonColor = false
+    btn.ZIndex = 87
+    btn.LayoutOrder = (i - 1) * 2 + 1
+    btn.Parent = bcmList
+    Crn(btn, 4)
+
+    bcmButtons[mName] = btn
+
+    btn.MouseEnter:Connect(function()
+        local isCur = bcmTarget and featureBinds[bcmTarget.name] and (featureBinds[bcmTarget.name].mode or "Toggle") == mName
+        if mName == "Clear" then
+            Tw(btn, {
+                BackgroundColor3 = Color3.fromRGB(200, 40, 50),
+                BackgroundTransparency = 0.85,
+                TextColor3 = Color3.fromRGB(255, 120, 130)
+            }, 0.12)
+        else
+            Tw(btn, {
+                BackgroundColor3 = T.accent,
+                BackgroundTransparency = isCur and 0.70 or 0.88,
+                TextColor3 = Color3.fromRGB(255, 255, 255)
+            }, 0.12)
+        end
+    end)
+    btn.MouseLeave:Connect(function()
+        local isCur = bcmTarget and featureBinds[bcmTarget.name] and (featureBinds[bcmTarget.name].mode or "Toggle") == mName
+        if mName == "Clear" then
+            Tw(btn, {
+                TextColor3 = Color3.fromRGB(230, 85, 95),
+                BackgroundTransparency = 1
+            }, 0.14)
+        elseif isCur then
+            Tw(btn, {
+                TextColor3 = T.accent,
+                BackgroundColor3 = T.accent,
+                BackgroundTransparency = 0.84
+            }, 0.14)
+        else
+            Tw(btn, {
+                TextColor3 = T.textDim,
+                BackgroundTransparency = 1
+            }, 0.14)
+        end
+    end)
+    btn.MouseButton1Click:Connect(function()
+        SelectBindMode(mName)
+    end)
+
+    if i < 4 then
+        local sep = Instance.new("Frame")
+        sep.Size = UDim2.new(1, 0, 0, 3)
+        sep.BackgroundTransparency = 1
+        sep.BorderSizePixel = 0
+        sep.LayoutOrder = (i - 1) * 2 + 2
+        sep.Parent = bcmList
+
+        local line = Instance.new("Frame")
+        line.Size = UDim2.new(1, -12, 0, 1)
+        line.AnchorPoint = Vector2.new(0.5, 0.5)
+        line.Position = UDim2.new(0.5, 0, 0.5, 0)
+        line.BackgroundColor3 = Color3.fromRGB(34, 34, 46)
+        line.BorderSizePixel = 0
+        line.Parent = sep
+    end
+end
+
+local OpenKeybindContextMenu = function(targetName, dotsBtn, dotsF, targetToggle)
+    bcmIsOpen = true
+    bcmTarget = {name = targetName, dotsBtn = dotsBtn, dotsF = dotsF, toggle = targetToggle}
+    UpdateBcmVisuals()
+
+    local absPos = dotsBtn.AbsolutePosition
+    local absSize = dotsBtn.AbsoluteSize
+    local vSize = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1920, 1080)
+    local posX = math.clamp(absPos.X - 35, 10, vSize.X - 96)
+    local posY = math.clamp(absPos.Y + absSize.Y + 4, 10, vSize.Y - 105)
+
+    local targetPos = UDim2.new(0, posX, 0, posY)
+    local startPos = UDim2.new(0, posX, 0, posY - 6)
+
+    bindContextMenu.Position = startPos
+    bindContextMenu.Visible = true
+    bindContextMenu.Size = UDim2.new(0, 86, 0, 0)
+    Tw(bindContextMenu, {Size = UDim2.new(0, 86, 0, 96), Position = targetPos}, 0.20, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+    for i, mName in ipairs({"Toggle", "Hold", "Always", "Clear"}) do
+        local btn = bcmButtons[mName]
+        if btn then
+            btn.Position = UDim2.new(0, -6, 0, 0)
+            btn.TextTransparency = 1
+            task.delay(i * 0.02, function()
+                if bcmIsOpen and btn.Parent then
+                    Tw(btn, {Position = UDim2.new(0, 0, 0, 0), TextTransparency = 0}, 0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+                end
+            end)
+        end
+    end
+end
+
+table.insert(allConn, UIS.InputBegan:Connect(function(i)
+    if bindContextMenu.Visible and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.MouseButton2 or i.UserInputType == Enum.UserInputType.MouseButton3) then
+        local mPos = i.Position
+        local bPos = bindContextMenu.AbsolutePosition
+        local bSize = bindContextMenu.AbsoluteSize
+        if mPos.X < bPos.X or mPos.X > bPos.X + bSize.X or mPos.Y < bPos.Y or mPos.Y > bPos.Y + bSize.Y then
+            CloseKeybindContextMenu(false)
+        end
+    end
+end))
+
+local function CancelBinding()
+    if listeningTarget then
+        if listeningTarget.isMenuKey then
+            if listeningTarget.btn then
+                listeningTarget.btn.Text = FormatKeyName(TOGGLE_KEY or "Delete")
+                listeningTarget.btn.TextColor3 = T.accent
+            end
+        elseif listeningTarget.toggle and listeningTarget.toggle.refreshBindText then
+            listeningTarget.toggle.refreshBindText()
+        elseif listeningTarget.btn then
+            local isBound = featureBinds[listeningTarget.name] ~= nil and (featureBinds[listeningTarget.name].key ~= nil or featureBinds[listeningTarget.name].mode == "Always")
+            listeningTarget.btn.Text = isBound and (featureBinds[listeningTarget.name].shortKey or "ALW") or "..."
+            listeningTarget.btn.TextColor3 = isBound and T.accent or T.textMuted
+        end
+        if listeningTarget.frame then
+            local s = listeningTarget.frame:FindFirstChildOfClass("UIStroke")
+            if s then Tw(s, {Color = T.border}, 0.15) end
+        end
+        listeningTarget = nil
+    end
+end
+
+local function StartBinding(name, dotsBtn, dotsF, toggleObj)
+    CancelBinding()
+    listeningTarget = {
+        name = name,
+        btn = dotsBtn,
+        frame = dotsF,
+        toggle = toggleObj,
+        startTime = os.clock(),
+    }
+    dotsBtn.Text = "..."
+    dotsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    local s = dotsF and dotsF:FindFirstChildOfClass("UIStroke")
+    if s then Tw(s, {Color = T.accent}, 0.15) end
+end
+
+local function FinishListening(bindKey, shortKey)
+    if not listeningTarget then return end
+    if listeningTarget.isMenuKey then
+        TOGGLE_KEY = bindKey
+        local sKey = shortKey or FormatKeyName(bindKey)
+        if listeningTarget.btn then
+            listeningTarget.btn.Text = sKey
+            listeningTarget.btn.TextColor3 = T.accent
+        end
+        if listeningTarget.frame then
+            local s = listeningTarget.frame:FindFirstChildOfClass("UIStroke")
+            if s then Tw(s, {Color = T.border}, 0.15) end
+        end
+        listeningTarget = nil
+        SaveConfig()
+        return
+    end
+
+    local name = listeningTarget.name
+    local prevMode = (featureBinds[name] and featureBinds[name].mode) or "Toggle"
+    featureBinds[name] = {
+        key = bindKey,
+        shortKey = shortKey or FormatKeyName(bindKey),
+        mode = prevMode,
+        toggleObj = listeningTarget.toggle,
+        name = name,
+    }
+    if listeningTarget.btn then
+        listeningTarget.btn.Text = shortKey or FormatKeyName(bindKey)
+        listeningTarget.btn.TextColor3 = T.accent
+    end
+    if listeningTarget.frame then
+        local s = listeningTarget.frame:FindFirstChildOfClass("UIStroke")
+        if s then Tw(s, {Color = T.border}, 0.15) end
+    end
+    listeningTarget = nil
+    if ConfigSystem.UpdateKeybindsHud then ConfigSystem.UpdateKeybindsHud() end
+    SaveConfig()
+end
+
 local function AddToggle(tabName, name, defOn, callback, noBind)
     local pg = tabPages[tabName]
     pg.order += 1
@@ -1514,10 +1867,32 @@ local function AddToggle(tabName, name, defOn, callback, noBind)
         dotsBtn.ZIndex = 8
         dotsBtn.Parent = dotsF
 
+        -- Restore saved bind if present
+        if not noBind and savedBinds and savedBinds[name] then
+            local rawB = savedBinds[name]
+            local bKey = (type(rawB) == "table" and rawB.key) or (type(rawB) == "string" and rawB) or nil
+            local bMode = (type(rawB) == "table" and rawB.mode) or "Toggle"
+            if bKey or bMode == "Always" then
+                featureBinds[name] = {
+                    key = bKey,
+                    shortKey = bKey and FormatKeyName(bKey) or "ALW",
+                    mode = bMode,
+                    toggleObj = tObj,
+                    name = name,
+                }
+                if bMode == "Always" then
+                    task.defer(function() tObj.setToggle(true, true) end)
+                end
+            end
+        end
+
         local function refreshBindText()
             local b = featureBinds[name]
             if b and b.key then
-                dotsBtn.Text = b.shortKey
+                dotsBtn.Text = b.shortKey or FormatKeyName(b.key)
+                dotsBtn.TextColor3 = T.accent
+            elseif b and b.mode == "Always" then
+                dotsBtn.Text = "ALW"
                 dotsBtn.TextColor3 = T.accent
             else
                 dotsBtn.Text = "..."
@@ -1527,27 +1902,39 @@ local function AddToggle(tabName, name, defOn, callback, noBind)
 
         dotsBtn.MouseButton1Click:Connect(function()
             if listeningTarget and listeningTarget.name == name then
-                listeningTarget = nil
-                refreshBindText()
+                CancelBinding()
             else
-                listeningTarget = {name = name, btn = dotsBtn, frame = dotsF, toggle = tObj}
-                dotsBtn.Text = "..."
-                dotsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+                StartBinding(name, dotsBtn, dotsF, tObj)
             end
         end)
         dotsBtn.MouseButton2Click:Connect(function()
-            featureBinds[name] = nil
-            refreshBindText()
-            if ConfigSystem.UpdateKeybindsHud then ConfigSystem.UpdateKeybindsHud() end
-            SaveConfig()
+            if listeningTarget then CancelBinding() end
+            OpenKeybindContextMenu(name, dotsBtn, dotsF, tObj)
+        end)
+        dotsBtn.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton3 then
+                if listeningTarget then CancelBinding() end
+                OpenKeybindContextMenu(name, dotsBtn, dotsF, tObj)
+            end
         end)
         dotsBtn.MouseEnter:Connect(function()
             Tw(dotsF, {BackgroundColor3 = Color3.fromRGB(24, 24, 34)}, 0.12)
+            local isBound = (featureBinds[name] ~= nil and (featureBinds[name].key ~= nil or featureBinds[name].mode == "Always"))
+            if not (listeningTarget and listeningTarget.name == name) then
+                Tw(dotsBtn, {TextColor3 = isBound and Color3.fromRGB(255, 255, 255) or T.textDim}, 0.12)
+            end
         end)
         dotsBtn.MouseLeave:Connect(function()
             Tw(dotsF, {BackgroundColor3 = T.dotsBg}, 0.12)
+            local isBound = (featureBinds[name] ~= nil and (featureBinds[name].key ~= nil or featureBinds[name].mode == "Always"))
+            if not (listeningTarget and listeningTarget.name == name) then
+                Tw(dotsBtn, {TextColor3 = isBound and T.accent or T.textMuted}, 0.12)
+            end
         end)
+        tObj.dotsBtn = dotsBtn
+        tObj.dotsF = dotsF
         tObj.refreshBindText = refreshBindText
+        refreshBindText()
     end
 
     tObj.name = name
@@ -2229,82 +2616,226 @@ do
 
     local function UpdateKeybindsHud()
         for _, ch in ipairs(listF:GetChildren()) do
-            if ch:IsA("Frame") then ch:Destroy() end
+            if ch:IsA("Frame") or ch:IsA("TextButton") then ch:Destroy() end
         end
         local count = 0
         for name, b in pairs(featureBinds) do
-            if b and b.key then
+            if b and (b.key or b.mode == "Always") then
                 count += 1
                 local row = Instance.new("Frame")
-                row.Size = UDim2.new(1, 0, 0, 16)
+                row.Size = UDim2.new(1, 0, 0, 18)
                 row.BackgroundTransparency = 1
                 row.LayoutOrder = count
                 row.Parent = listF
 
-                local nameL = Lbl(row, name, 9, T.textDim, Enum.Font.Arcade, Enum.TextXAlignment.Left, 2)
+                local nameL = Lbl(row, name, 9, T.text, Enum.Font.Arcade, Enum.TextXAlignment.Left, 2)
                 nameL.Position = UDim2.new(0, 4, 0, 0)
-                nameL.Size = UDim2.new(0.65, 0, 1, 0)
+                nameL.Size = UDim2.new(1, -55, 1, 0)
+                nameL.TextTruncate = Enum.TextTruncate.AtEnd
 
-                local stateL = Lbl(row, "[" .. tostring(b.shortKey) .. "]", 9, (b.toggleObj and b.toggleObj.isEnabled()) and T.accent or T.textMuted, Enum.Font.Arcade, Enum.TextXAlignment.Right, 2)
-                stateL.Position = UDim2.new(0.65, 0, 0, 0)
-                stateL.Size = UDim2.new(0.35, -4, 1, 0)
+                local keyText = "[...]"
+                if b.key then
+                    keyText = "[" .. tostring(b.shortKey or FormatKeyName(b.key)) .. "]"
+                elseif b.mode == "Always" then
+                    keyText = "[Always]"
+                end
+
+                local isAct = (b.toggleObj and b.toggleObj.isEnabled())
+                local stateBtn = Instance.new("TextButton")
+                stateBtn.Size = UDim2.new(0, 52, 1, 0)
+                stateBtn.Position = UDim2.new(1, -54, 0, 0)
+                stateBtn.BackgroundTransparency = 1
+                stateBtn.Font = Enum.Font.Arcade
+                stateBtn.TextSize = 9
+                stateBtn.TextXAlignment = Enum.TextXAlignment.Right
+                stateBtn.Text = keyText
+                stateBtn.TextColor3 = isAct and T.accent or T.textMuted
+                stateBtn.AutoButtonColor = false
+                stateBtn.ZIndex = 4
+                stateBtn.Parent = row
+
+                stateBtn.MouseButton1Click:Connect(function()
+                    if b.toggleObj and b.toggleObj.dotsBtn then
+                        StartBinding(name, b.toggleObj.dotsBtn, b.toggleObj.dotsF, b.toggleObj)
+                    end
+                end)
+                stateBtn.MouseButton2Click:Connect(function()
+                    if b.toggleObj and b.toggleObj.dotsBtn then
+                        OpenKeybindContextMenu(name, b.toggleObj.dotsBtn, b.toggleObj.dotsF, b.toggleObj)
+                    end
+                end)
             end
         end
-        hud.Size = UDim2.new(0, 170, 0, 24 + math.max(0, count * 18 + 4))
+        hud.Size = UDim2.new(0, 170, 0, 24 + math.max(0, count * 20 + 4))
     end
     ConfigSystem.UpdateKeybindsHud = UpdateKeybindsHud
+
+    do
+        local dragging, dragStart, startPos
+        hTop.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragStart = input.Position
+                startPos = hud.Position
+            end
+        end)
+        hTop.InputEnded:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
+        end)
+        UIS.InputChanged:Connect(function(input)
+            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+                local delta = input.Position - dragStart
+                hud.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end)
+    end
 end
 
 -- ══════════════════════════════════════════════
 --  KEYBOARD / INPUT LISTENER
 -- ══════════════════════════════════════════════
-table.insert(allConn, UIS.InputBegan:Connect(function(input, gpe)
-    local inKey = nil
-    if input.UserInputType == Enum.UserInputType.Keyboard then
-        inKey = input.KeyCode.Name
-    elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-        inKey = "MouseButton2"
-    elseif input.UserInputType == Enum.UserInputType.MouseButton3 then
-        inKey = "MouseButton3"
-    end
-
+local function TriggerBindByInput(inKey, isDown)
     if not inKey then return end
+    for name, bInfo in pairs(featureBinds) do
+        if bInfo.toggleObj and MatchBindKey(bInfo.key, inKey) then
+            local mode = bInfo.mode or "Toggle"
+            if mode == "Toggle" then
+                if isDown then
+                    bInfo.toggleObj.setToggle(not bInfo.toggleObj.isEnabled(), true)
+                end
+            elseif mode == "Hold" then
+                bInfo.toggleObj.setToggle(isDown, true)
+            end
+        end
+    end
+end
 
-    -- Listening mode for setting bind
+-- Hardware-level mouse button 4 and mouse button 5 detection for executors
+local isKeyFunc = iskeydown or (syn and syn.iskeydown) or (crypt and crypt.iskeydown) or iskeypressed
+if isKeyFunc then
+    local mb4Held, mb5Held = false, false
+    task.spawn(function()
+        while true do
+            task.wait(0.015)
+            if not _G.NovaTriggerEspLoaded then break end
+            local ok4, d4 = pcall(isKeyFunc, 0x05)
+            local ok5, d5 = pcall(isKeyFunc, 0x06)
+            if listeningTarget then
+                if ok4 and d4 then
+                    FinishListening("MouseBackButton", "MB4")
+                    task.wait(0.2)
+                elseif ok5 and d5 then
+                    FinishListening("MouseButton5", "MB5")
+                    task.wait(0.2)
+                end
+            else
+                if ok4 then
+                    if d4 and not mb4Held then
+                        mb4Held = true
+                        TriggerBindByInput("MouseBackButton", true)
+                    elseif not d4 and mb4Held then
+                        mb4Held = false
+                        TriggerBindByInput("MouseBackButton", false)
+                    end
+                end
+                if ok5 then
+                    if d5 and not mb5Held then
+                        mb5Held = true
+                        TriggerBindByInput("MouseButton5", true)
+                    elseif not d5 and mb5Held then
+                        mb5Held = false
+                        TriggerBindByInput("MouseButton5", false)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+table.insert(allConn, UIS.InputBegan:Connect(function(input, gpe)
+    local key = input.KeyCode
+    local uType = input.UserInputType
+    local kName = (key and key ~= Enum.KeyCode.Unknown and key.Name) or nil
+
+    local isMB4 = (key == Enum.KeyCode.MouseBackButton) or (kName == "MouseBackButton")
+        or tostring(uType):find("MouseButton4") or tostring(uType):find("Button4")
+        or tostring(key):find("MouseBackButton") or tostring(key):find("Button4")
+    local isMB5 = tostring(uType):find("MouseButton5") or tostring(uType):find("Button5")
+        or tostring(key):find("MouseForwardButton") or tostring(key):find("Button5")
+
+    -- 1. If currently listening for a bind
     if listeningTarget then
-        if inKey == "Escape" then
-            if listeningTarget.btn then listeningTarget.btn.Text = "..." end
-            listeningTarget = nil
+        if (os.clock() - (listeningTarget.startTime or 0)) < 0.08 then return end
+
+        if isMB4 then
+            FinishListening("MouseBackButton", "MB4")
+            return
+        elseif isMB5 then
+            FinishListening("MouseButton5", "MB5")
+            return
+        elseif kName then
+            if kName == "Escape" then
+                CancelBinding()
+                return
+            elseif kName == "Backspace" or kName == "Delete" then
+                if listeningTarget.isMenuKey then
+                    FinishListening(kName, FormatKeyName(kName))
+                    return
+                end
+                local name = listeningTarget.name
+                featureBinds[name] = nil
+                if listeningTarget.btn then
+                    listeningTarget.btn.Text = "..."
+                    listeningTarget.btn.TextColor3 = T.textMuted
+                end
+                if listeningTarget.frame then
+                    local s = listeningTarget.frame:FindFirstChildOfClass("UIStroke")
+                    if s then Tw(s, {Color = T.border}, 0.15) end
+                end
+                listeningTarget = nil
+                if ConfigSystem.UpdateKeybindsHud then ConfigSystem.UpdateKeybindsHud() end
+                SaveConfig()
+                return
+            else
+                FinishListening(kName, FormatKeyName(kName))
+                return
+            end
+        elseif uType == Enum.UserInputType.MouseButton1 then
+            FinishListening("MouseButton1", "MB1")
+            return
+        elseif uType == Enum.UserInputType.MouseButton2 then
+            FinishListening("MouseButton2", "MB2")
+            return
+        elseif uType == Enum.UserInputType.MouseButton3 then
+            FinishListening("MouseButton3", "MB3")
             return
         end
-
-        local sKey = FormatKeyName(inKey)
-        if listeningTarget.isMenuKey then
-            TOGGLE_KEY = inKey
-            listeningTarget.btn.Text = sKey
-            listeningTarget.btn.TextColor3 = T.accent
-            listeningTarget = nil
-            SaveConfig()
-            return
-        end
-
-        featureBinds[listeningTarget.name] = {
-            key = inKey,
-            shortKey = sKey,
-            mode = "Toggle",
-            toggleObj = listeningTarget.toggle
-        }
-        if listeningTarget.toggle and listeningTarget.toggle.refreshBindText then
-            listeningTarget.toggle.refreshBindText()
-        end
-        listeningTarget = nil
-        if ConfigSystem.UpdateKeybindsHud then ConfigSystem.UpdateKeybindsHud() end
-        SaveConfig()
         return
     end
 
-    -- Menu Toggle Key
-    if inKey == TOGGLE_KEY and not gpe then
+    -- 2. Menu Toggle Key
+    local kn = tostring(input.KeyCode):gsub("Enum.KeyCode.", "")
+    local isToggleMatch = MatchBindKey(TOGGLE_KEY, kn)
+    if not isToggleMatch and isMB4 and MatchBindKey(TOGGLE_KEY, "MouseBackButton") then
+        isToggleMatch = true
+    elseif not isToggleMatch and isMB5 and MatchBindKey(TOGGLE_KEY, "MouseButton5") then
+        isToggleMatch = true
+    elseif not isToggleMatch and uType == Enum.UserInputType.MouseButton1 and MatchBindKey(TOGGLE_KEY, "MouseButton1") then
+        isToggleMatch = true
+    elseif not isToggleMatch and uType == Enum.UserInputType.MouseButton2 and MatchBindKey(TOGGLE_KEY, "MouseButton2") then
+        isToggleMatch = true
+    elseif not isToggleMatch and uType == Enum.UserInputType.MouseButton3 and MatchBindKey(TOGGLE_KEY, "MouseButton3") then
+        isToggleMatch = true
+    end
+
+    if isToggleMatch then
+        local focusedTB = UIS:GetFocusedTextBox()
+        if focusedTB then
+            local isNonChar = (kn == "Delete" or kn == "Insert" or kn == "RightShift" or kn == "RightControl" or kn == "LeftAlt" or kn == "RightAlt" or kn:sub(1,1) == "F" or isMB4 or isMB5)
+            if not isNonChar then return end
+        end
         menuOpen = not menuOpen
         win.Visible = menuOpen
         if not menuOpen then
@@ -2316,13 +2847,71 @@ table.insert(allConn, UIS.InputBegan:Connect(function(input, gpe)
         return
     end
 
-    -- Feature Binds Activation
-    if not gpe then
-        for name, b in pairs(featureBinds) do
-            if b.key == inKey and b.toggleObj then
-                b.toggleObj.setToggle(not b.toggleObj.isEnabled(), true)
-            end
+    -- 3. Click check inside menu window
+    local isInsideMenu = false
+    if menuOpen and win and win.Parent then
+        local mPos = UIS:GetMouseLocation()
+        local wPos = win.AbsolutePosition
+        local wSize = win.AbsoluteSize
+        if mPos.X >= wPos.X and mPos.X <= wPos.X + wSize.X and mPos.Y >= wPos.Y and mPos.Y <= wPos.Y + wSize.Y then
+            isInsideMenu = true
         end
+    end
+
+    if gpe and input.UserInputType == Enum.UserInputType.Keyboard and not isMB4 then
+        return
+    end
+
+    local pressedKey = nil
+    if isMB4 then
+        pressedKey = "MouseBackButton"
+    elseif isMB5 then
+        pressedKey = "MouseButton5"
+    elseif kName then
+        pressedKey = kName
+    elseif not isInsideMenu then
+        if uType == Enum.UserInputType.MouseButton1 then
+            pressedKey = "MouseButton1"
+        elseif uType == Enum.UserInputType.MouseButton2 then
+            pressedKey = "MouseButton2"
+        elseif uType == Enum.UserInputType.MouseButton3 then
+            pressedKey = "MouseButton3"
+        end
+    end
+
+    if pressedKey then
+        TriggerBindByInput(pressedKey, true)
+    end
+end))
+
+table.insert(allConn, UIS.InputEnded:Connect(function(input)
+    local key = input.KeyCode
+    local uType = input.UserInputType
+    local kName = (key and key ~= Enum.KeyCode.Unknown and key.Name) or nil
+
+    local isMB4 = (key == Enum.KeyCode.MouseBackButton) or (kName == "MouseBackButton")
+        or tostring(uType):find("MouseButton4") or tostring(uType):find("Button4")
+        or tostring(key):find("MouseBackButton") or tostring(key):find("Button4")
+    local isMB5 = tostring(uType):find("MouseButton5") or tostring(uType):find("Button5")
+        or tostring(key):find("MouseForwardButton") or tostring(key):find("Button5")
+
+    local releasedKey = nil
+    if isMB4 then
+        releasedKey = "MouseBackButton"
+    elseif isMB5 then
+        releasedKey = "MouseButton5"
+    elseif kName then
+        releasedKey = kName
+    elseif uType == Enum.UserInputType.MouseButton1 then
+        releasedKey = "MouseButton1"
+    elseif uType == Enum.UserInputType.MouseButton2 then
+        releasedKey = "MouseButton2"
+    elseif uType == Enum.UserInputType.MouseButton3 then
+        releasedKey = "MouseButton3"
+    end
+
+    if releasedKey then
+        TriggerBindByInput(releasedKey, false)
     end
 end))
 
@@ -2333,6 +2922,9 @@ _G.NovaTriggerEspUnload = function()
     _G.NovaTriggerEspLoaded = nil
     _G.NovaTriggerEspUnload = nil
 
+    pcall(function()
+        if bindContextMenu then bindContextMenu:Destroy() end
+    end)
     for _, c in ipairs(allConn) do
         pcall(function() c:Disconnect() end)
     end
