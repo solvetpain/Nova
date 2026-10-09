@@ -1401,7 +1401,12 @@ local function AddSection(tabName, title)
 end
 
 -- ── BIND MODE CONTEXT MENU (Toggle / Hold / Always / Clear) ──
-local bindContextMenu = Instance.new("Frame")
+local hasCanvasGroup = pcall(function()
+    local cg = Instance.new("CanvasGroup")
+    cg:Destroy()
+end)
+
+local bindContextMenu = hasCanvasGroup and Instance.new("CanvasGroup") or Instance.new("Frame")
 bindContextMenu.Name = "NOVA_BindContextMenu"
 bindContextMenu.Size = UDim2.new(0, 86, 0, 96)
 bindContextMenu.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
@@ -1412,6 +1417,9 @@ bindContextMenu.ClipsDescendants = true
 bindContextMenu.Parent = mainSG
 Crn(bindContextMenu, 5)
 local bcmStroke = Strk(bindContextMenu, T.border, 1, 0)
+if hasCanvasGroup then
+    bindContextMenu.GroupTransparency = 1
+end
 table.insert(allGuis, bindContextMenu)
 
 local bcmList = Instance.new("Frame")
@@ -1436,24 +1444,33 @@ bcmLL.Parent = bcmList
 local bcmTarget = nil
 local bcmButtons = {}
 local bcmIsOpen = false
+local bcmOpenTime = 0
 
 local CloseKeybindContextMenu
 CloseKeybindContextMenu = function(immediate)
     if not bindContextMenu.Visible then return end
+    if not immediate and (os.clock() - bcmOpenTime) < 0.2 then return end
     bcmIsOpen = false
     bcmTarget = nil
 
     if immediate then
         bindContextMenu.Visible = false
+        if hasCanvasGroup then bindContextMenu.GroupTransparency = 1 end
         return
     end
 
     local curPos = bindContextMenu.Position
     local hidePos = UDim2.new(curPos.X.Scale, curPos.X.Offset, curPos.Y.Scale, curPos.Y.Offset - 5)
-    Tw(bindContextMenu, {Size = UDim2.new(0, 86, 0, 0), Position = hidePos}, 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    if hasCanvasGroup then
+        Tw(bindContextMenu, {GroupTransparency = 1, Position = hidePos}, 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    else
+        Tw(bindContextMenu, {Position = hidePos}, 0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+    end
     task.delay(0.15, function()
         if not bcmIsOpen then
             bindContextMenu.Visible = false
+            bindContextMenu.Position = hidePos
+            if hasCanvasGroup then bindContextMenu.GroupTransparency = 1 end
         end
     end)
 end
@@ -1514,7 +1531,8 @@ local function SelectBindMode(mName)
             Tw(targetCopy.dotsBtn, {TextColor3 = Color3.fromRGB(255, 255, 255)}, 0.08)
             task.delay(0.1, function()
                 if targetCopy.dotsBtn and targetCopy.dotsBtn.Parent then
-                    Tw(targetCopy.dotsBtn, {TextColor3 = T.accent}, 0.22)
+                    local isBound = featureBinds[tName] and (featureBinds[tName].key ~= nil or featureBinds[tName].mode == "Always")
+                    Tw(targetCopy.dotsBtn, {TextColor3 = isBound and T.accent or T.textMuted}, 0.22)
                 end
             end)
         end
@@ -1615,44 +1633,60 @@ for i, mName in ipairs({"Toggle", "Hold", "Always", "Clear"}) do
 end
 
 local OpenKeybindContextMenu = function(targetName, dotsBtn, dotsF, targetToggle)
+    if bcmIsOpen and bcmTarget and bcmTarget.name == targetName then
+        if (os.clock() - bcmOpenTime) < 0.25 then return end
+        CloseKeybindContextMenu(false)
+        return
+    end
+
     bcmIsOpen = true
+    bcmOpenTime = os.clock()
     bcmTarget = {name = targetName, dotsBtn = dotsBtn, dotsF = dotsF, toggle = targetToggle}
     UpdateBcmVisuals()
 
     local absPos = dotsBtn.AbsolutePosition
     local absSize = dotsBtn.AbsoluteSize
     local vSize = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(1920, 1080)
-    local posX = math.clamp(absPos.X - 35, 10, vSize.X - 96)
+    local posX = math.clamp(absPos.X - 30, 10, vSize.X - 96)
     local posY = math.clamp(absPos.Y + absSize.Y + 4, 10, vSize.Y - 105)
 
     local targetPos = UDim2.new(0, posX, 0, posY)
-    local startPos = UDim2.new(0, posX, 0, posY - 6)
+    local startPos = UDim2.new(0, posX, 0, posY - 5)
 
+    bindContextMenu.Size = UDim2.new(0, 86, 0, 96)
     bindContextMenu.Position = startPos
     bindContextMenu.Visible = true
-    bindContextMenu.Size = UDim2.new(0, 86, 0, 0)
-    Tw(bindContextMenu, {Size = UDim2.new(0, 86, 0, 96), Position = targetPos}, 0.20, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 
-    for i, mName in ipairs({"Toggle", "Hold", "Always", "Clear"}) do
+    if hasCanvasGroup then
+        bindContextMenu.GroupTransparency = 1
+        Tw(bindContextMenu, {GroupTransparency = 0, Position = targetPos}, 0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+    else
+        Tw(bindContextMenu, {Position = targetPos}, 0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+    end
+
+    for _, mName in ipairs({"Toggle", "Hold", "Always", "Clear"}) do
         local btn = bcmButtons[mName]
         if btn then
-            btn.Position = UDim2.new(0, -6, 0, 0)
-            btn.TextTransparency = 1
-            task.delay(i * 0.02, function()
-                if bcmIsOpen and btn.Parent then
-                    Tw(btn, {Position = UDim2.new(0, 0, 0, 0), TextTransparency = 0}, 0.16, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-                end
-            end)
+            btn.TextTransparency = 0
         end
     end
 end
 
 table.insert(allConn, UIS.InputBegan:Connect(function(i)
-    if bindContextMenu.Visible and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.MouseButton2 or i.UserInputType == Enum.UserInputType.MouseButton3) then
-        local mPos = i.Position
+    if not bcmIsOpen or not bindContextMenu.Visible then return end
+    if (os.clock() - bcmOpenTime) < 0.25 then return end
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.MouseButton2 or i.UserInputType == Enum.UserInputType.MouseButton3 then
+        local mPos = UIS:GetMouseLocation()
         local bPos = bindContextMenu.AbsolutePosition
         local bSize = bindContextMenu.AbsoluteSize
-        if mPos.X < bPos.X or mPos.X > bPos.X + bSize.X or mPos.Y < bPos.Y or mPos.Y > bPos.Y + bSize.Y then
+        if mPos.X < bPos.X or mPos.X > (bPos.X + bSize.X) or mPos.Y < bPos.Y or mPos.Y > (bPos.Y + bSize.Y) then
+            if bcmTarget and bcmTarget.dotsBtn and bcmTarget.dotsBtn.Parent then
+                local dPos = bcmTarget.dotsBtn.AbsolutePosition
+                local dSize = bcmTarget.dotsBtn.AbsoluteSize
+                if mPos.X >= dPos.X and mPos.X <= (dPos.X + dSize.X) and mPos.Y >= dPos.Y and mPos.Y <= (dPos.Y + dSize.Y) then
+                    return
+                end
+            end
             CloseKeybindContextMenu(false)
         end
     end
@@ -1912,7 +1946,7 @@ local function AddToggle(tabName, name, defOn, callback, noBind)
             OpenKeybindContextMenu(name, dotsBtn, dotsF, tObj)
         end)
         dotsBtn.InputBegan:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.MouseButton3 then
+            if i.UserInputType == Enum.UserInputType.MouseButton2 or i.UserInputType == Enum.UserInputType.MouseButton3 then
                 if listeningTarget then CancelBinding() end
                 OpenKeybindContextMenu(name, dotsBtn, dotsF, tObj)
             end
@@ -2662,6 +2696,13 @@ do
                 stateBtn.MouseButton2Click:Connect(function()
                     if b.toggleObj and b.toggleObj.dotsBtn then
                         OpenKeybindContextMenu(name, b.toggleObj.dotsBtn, b.toggleObj.dotsF, b.toggleObj)
+                    end
+                end)
+                stateBtn.InputBegan:Connect(function(i)
+                    if i.UserInputType == Enum.UserInputType.MouseButton2 or i.UserInputType == Enum.UserInputType.MouseButton3 then
+                        if b.toggleObj and b.toggleObj.dotsBtn then
+                            OpenKeybindContextMenu(name, b.toggleObj.dotsBtn, b.toggleObj.dotsF, b.toggleObj)
+                        end
                     end
                 end)
             end
